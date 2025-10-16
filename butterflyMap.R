@@ -217,7 +217,7 @@ ui <- fluidPage(
         h1("Butterfly"),
         div(
           class = "park-selector",
-          selectInput("park", "Choose a park", choices = parks, selected = parks[1])
+          selectInput("park", "Choose a park", choices = c("Choose a park" = "", parks), selected = "")
         )
       ),
       div(
@@ -342,7 +342,7 @@ ui <- fluidPage(
         }
       }
 
-      function renderSpecies(speciesList) {
+      function renderSpecies(speciesList, hideCircles = false) {
         const nodes = svg.selectAll('g.species-node')
           .data(speciesList, d => d.species_group);
 
@@ -390,13 +390,13 @@ ui <- fluidPage(
         merged.select('circle.cluster-halo')
           .transition()
           .duration(400)
-          .attr('r', d => d.haloRadius)
+          .attr('r', d => hideCircles ? 0 : d.haloRadius)
           .attr('stroke', d => d.color || '#3a9d7a');
 
         merged.select('circle.cluster-hitarea')
           .transition()
           .duration(400)
-          .attr('r', d => d.haloRadius * 1.2);
+          .attr('r', d => hideCircles ? 0 : d.haloRadius * 1.2);
 
         merged.select('text')
           .text(d => d.display_name);
@@ -450,31 +450,40 @@ ui <- fluidPage(
         }
       }
 
-      function render(data) {
+      function render(data, hasSelection = true) {
         speciesData = layoutSpecies(data);
         if (!speciesData.length) {
           updateDetails(null);
           return;
         }
 
-        renderSpecies(speciesData);
-        renderDots(speciesData);
+        renderSpecies(speciesData, !hasSelection);
+        if (hasSelection) {
+          renderDots(speciesData);
+        } else {
+          // Clear dots when no park selected
+          svg.selectAll('circle.dot').remove();
+        }
 
         // Bring species labels to front
         svg.selectAll('g.species-node').raise();
 
-        if (!selectedSpecies || !speciesData.some(d => d.display_name === selectedSpecies)) {
-          const withCount = speciesData.filter(d => d.count > 0);
-          selectedSpecies = (withCount[0] || speciesData[0] || {}).display_name || null;
+        if (hasSelection) {
+          if (!selectedSpecies || !speciesData.some(d => d.display_name === selectedSpecies)) {
+            selectedSpecies = null;
+          }
+          const active = selectedSpecies ? speciesData.find(d => d.display_name === selectedSpecies) : null;
+          updateDetails(active);
+        } else {
+          selectedSpecies = null;
+          updateDetails(null);
         }
-
-        const active = speciesData.find(d => d.display_name === selectedSpecies);
-        updateDetails(active);
       }
 
       Shiny.addCustomMessageHandler('updateButterflies', function(message) {
         const nodes = message.nodes || [];
-        render(nodes);
+        const hasSelection = message.hasSelection !== false;
+        render(nodes, hasSelection);
       });
 
       let resizeTimer;
@@ -505,12 +514,25 @@ server <- function(input, output, session) {
 
   observeEvent(input$park,
     {
-      nodes <- data_store() %>%
-        filter(park_name == input$park) %>%
-        select(park_name, species_group, display_name, latin_name, count, color, description, image_path)
+      if (is.null(input$park) || input$park == "") {
+        # No park selected - send all unique butterfly names with hasSelection = FALSE
+        nodes <- data_store() %>%
+          group_by(species_group, display_name, latin_name, color, description, image_path) %>%
+          summarise(count = 0, .groups = "drop") %>%
+          mutate(park_name = "") %>%
+          select(park_name, species_group, display_name, latin_name, count, color, description, image_path)
 
-      nodes_list <- lapply(seq_len(nrow(nodes)), function(i) as.list(nodes[i, ]))
-      session$sendCustomMessage("updateButterflies", list(nodes = nodes_list))
+        nodes_list <- lapply(seq_len(nrow(nodes)), function(i) as.list(nodes[i, ]))
+        session$sendCustomMessage("updateButterflies", list(nodes = nodes_list, hasSelection = FALSE))
+      } else {
+        # Park selected - send filtered data
+        nodes <- data_store() %>%
+          filter(park_name == input$park) %>%
+          select(park_name, species_group, display_name, latin_name, count, color, description, image_path)
+
+        nodes_list <- lapply(seq_len(nrow(nodes)), function(i) as.list(nodes[i, ]))
+        session$sendCustomMessage("updateButterflies", list(nodes = nodes_list, hasSelection = TRUE))
+      }
     },
     ignoreNULL = FALSE
   )
